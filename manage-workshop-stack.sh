@@ -4,11 +4,7 @@ STACK_OPERATION=$1
 
 if [[ "$STACK_OPERATION" == "Create" || "$STACK_OPERATION" == "Update" ]]; then
     echo "🎓 Creating Grafana MCP Workshop Environment..."
-    
-    # Install Node.js 22 LTS
-    curl -sL https://rpm.nodesource.com/setup_22.x | sudo bash -
-    sudo yum install -y nodejs jq git
-    
+     
     # Install and configure Podman (Docker-compatible)
     sudo yum install -y podman
     sudo systemctl start podman
@@ -16,13 +12,6 @@ if [[ "$STACK_OPERATION" == "Create" || "$STACK_OPERATION" == "Update" ]]; then
     
     # Create Docker alias for CDK compatibility
     sudo ln -sf /usr/bin/podman /usr/local/bin/docker
-
-    # Install AWS CDK
-    sudo npm install -g aws-cdk
-    
-    # Install dependencies and build
-    npm install
-    npm run build
     
     # Bootstrap CDK
     cdk bootstrap --require-approval never
