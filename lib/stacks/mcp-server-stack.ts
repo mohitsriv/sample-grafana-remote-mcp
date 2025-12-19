@@ -35,6 +35,9 @@ export class MCPServerStack extends cdk.Stack {
     super(scope, id, props);
 
       // Get context variables for Grafana configuration
+      // Get context variables for Grafana configuration
+      // NOTE: grafanaApiKey should be passed via command line to avoid committing secrets:
+      // cdk deploy MCP-Server --context grafanaApiKey="your_grafana_service_account_token"
       const grafanaUrl = this.node.tryGetContext("grafanaUrl") || "https://your-grafana-instance.com";
       const grafanaApiKey = this.node.tryGetContext("grafanaApiKey") || "";
       const mcpTransport = this.node.tryGetContext("mcpTransport") || "stdio";

@@ -17,6 +17,9 @@
     ]
   },
   "context": {
+    "grafanaUrl": "https://g-32c428c16a.grafana-workspace.us-east-1.amazonaws.com",
+    "grafanaApiKey": "",
+    "mcpTransport": "http",
     "@aws-cdk/aws-lambda:recognizeLayerVersion": true,
     "@aws-cdk/core:checkSecretUsage": true,
     "@aws-cdk/core:target-partitions": [

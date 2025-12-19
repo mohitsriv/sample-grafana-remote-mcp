@@ -10,6 +10,8 @@ export class GrafanaMcpHttpProxy {
   private mcpProcess: ChildProcess | null = null;
   private isInitialized = false;
   private mcpServerUrl: string;
+  private sessionId: string | null = null;
+  private sseConnection: AbortController | null = null;
 
   constructor(private config: GrafanaMcpHttpProxyConfig) {
     const port = config.mcpServerPort || 3001;
@@ -27,7 +29,7 @@ export class GrafanaMcpHttpProxy {
     const port = this.config.mcpServerPort || 3001;
 
     console.log(`Starting MCP server on port ${port} with Grafana URL: ${this.config.grafanaUrl}`);
-    
+
     // Start Grafana MCP server with HTTP transport - use --address 0.0.0.0:port to bind to all interfaces
     this.mcpProcess = spawn('mcp-grafana', ['-t', 'streamable-http', '--address', `0.0.0.0:${port}`], {
       stdio: ['ignore', 'pipe', 'pipe'],
@@ -67,54 +69,183 @@ export class GrafanaMcpHttpProxy {
 
   private async waitForServer(): Promise<void> {
     const maxRetries = 10;
-    const retryDelay = 500;
+    const retryDelayMs = 500;
 
-    console.log(`Waiting for MCP server to start at ${this.mcpServerUrl}`);
-    
+    const url = this.mcpServerUrl; // e.g. http://127.0.0.1:3001/mcp
+    console.log(`Waiting for MCP server to start at ${url}`);
+
+    const sleep = (ms: number) => new Promise(r => setTimeout(r, ms));
+
     for (let i = 0; i < maxRetries; i++) {
+      console.log(`Connection attempt ${i + 1}/${maxRetries} to ${url}`);
+
+      // 1) Try POST first (what we ultimately need for JSON-RPC)
       try {
-        console.log(`Connection attempt ${i + 1}/${maxRetries} to ${this.mcpServerUrl}`);
-        
-        // Try to connect to the streamable-http endpoint with POST only
-        const response = await fetch(`${this.mcpServerUrl}`, {
+        const ctrl = new AbortController();
+        const t = setTimeout(() => ctrl.abort(), 2500);
+
+        const res = await fetch(url, {
           method: 'POST',
           headers: { 'Content-Type': 'application/json' },
-          body: JSON.stringify({ jsonrpc: '2.0', method: 'ping', id: 1 })
+          // minimal body is fine; server will complain about session if stream transport
+          body: JSON.stringify({ jsonrpc: '2.0', method: 'ping', id: 1 }),
+          signal: ctrl.signal,
         });
-        
-        console.log(`Response status: ${response.status} ${response.statusText}`);
-        
-        if (response.ok) {
-          console.log('MCP server is ready!');
+        clearTimeout(t);
+
+        console.log(`POST status: ${res.status} ${res.statusText}`);
+
+        if (res.ok) {
+          console.log('MCP server is ready (POST 2xx).');
           return;
-        } else {
-          const errorText = await response.text();
-          console.log(`Response body: ${errorText.substring(0, 500)}`);
         }
-      } catch (error) {
-        console.log(`Connection attempt ${i + 1} failed:`, error instanceof Error ? error.message : error);
+
+        // StreamableHTTP: server is alive but requires a session → 400 "Invalid session ID"
+        const text = await res.text().catch(() => '');
+        if (res.status === 400 && text.includes('Invalid session ID')) {
+          console.log('MCP server is ready (POST 400 with "Invalid session ID").');
+          return;
+        }
+      } catch (e) {
+        console.log(`POST attempt failed: ${e instanceof Error ? e.message : String(e)}`);
       }
-      await new Promise(resolve => setTimeout(resolve, retryDelay));
+
+      // 2) Fallback probe: open SSE to confirm the stream endpoint is up
+      try {
+        const ctrl = new AbortController();
+        const t = setTimeout(() => ctrl.abort(), 2500);
+
+        const sse = await fetch(url, {
+          method: 'GET',
+          headers: { 'Accept': 'text/event-stream' },
+          signal: ctrl.signal,
+        });
+        clearTimeout(t);
+
+        const ctype = (sse.headers.get('content-type') || '').toLowerCase();
+        console.log(`GET(SSE) status: ${sse.status} ${sse.statusText} ctype=${ctype}`);
+
+        if (sse.status === 200 && ctype.includes('text/event-stream')) {
+          console.log('MCP server is ready (SSE 200).');
+          return;
+        }
+      } catch (e) {
+        console.log(`SSE attempt failed: ${e instanceof Error ? e.message : String(e)}`);
+      }
+
+      await sleep(retryDelayMs);
     }
+
     throw new Error('MCP server failed to start');
   }
 
-  async handleMcpRequest(requestBody: any): Promise<Response> {
+  private async establishSession(): Promise<void> {
+    if (this.sessionId && this.sseConnection) {
+      console.log('Session already established:', this.sessionId);
+      return;
+    }
+
+    console.log('Establishing SSE session with MCP server...');
+    
+    return new Promise((resolve, reject) => {
+      this.sseConnection = new AbortController();
+      
+      const timeout = setTimeout(() => {
+        this.sseConnection?.abort();
+        reject(new Error('SSE session establishment timeout'));
+      }, 10000);
+
+      fetch(this.mcpServerUrl, {
+        method: 'GET',
+        headers: {
+          'Accept': 'text/event-stream',
+        },
+        signal: this.sseConnection.signal,
+        // @ts-ignore - Node.js specific fetch options
+        bodyTimeout: 0, // Disable body timeout for SSE streams
+        headersTimeout: 10000,
+      }).then(response => {
+        if (!response.ok || !response.body) {
+          clearTimeout(timeout);
+          reject(new Error(`Failed to establish SSE connection: ${response.status}`));
+          return;
+        }
+
+        const reader = response.body.getReader();
+        const decoder = new TextDecoder();
+        let buffer = '';
+
+        const processChunk = async () => {
+          try {
+            const { done, value } = await reader.read();
+            
+            if (done) {
+              console.log('SSE stream ended');
+              this.sessionId = null;
+              this.sseConnection = null;
+              return;
+            }
+
+            buffer += decoder.decode(value, { stream: true });
+            console.log('SSE chunk received:', buffer);
+
+            // Look for session ID in the buffer
+            if (!this.sessionId) {
+              const match = buffer.match(/"sessionId"\s*:\s*"([^"]+)"/);
+              if (match) {
+                this.sessionId = match[1];
+                console.log('Session established:', this.sessionId);
+                clearTimeout(timeout);
+                resolve();
+                // Continue reading to keep connection alive
+                processChunk();
+              } else {
+                // Keep reading until we get the session ID
+                processChunk();
+              }
+            } else {
+              // Session already established, just keep reading
+              processChunk();
+            }
+          } catch (error) {
+            if (error instanceof Error && error.name !== 'AbortError') {
+              console.error('SSE connection error:', error);
+              this.sessionId = null;
+              this.sseConnection = null;
+            }
+          }
+        };
+
+        processChunk();
+      }).catch(error => {
+        clearTimeout(timeout);
+        reject(error);
+      });
+    });
+  }
+
+  async handleMcpRequest(requestBody: any, sessionId?: string): Promise<Response> {
     await this.initializeMcpServer();
 
-    console.log(`Forwarding request to MCP server:`, requestBody);
+    console.log(`Forwarding request to MCP server with session ${sessionId}:`, requestBody);
 
     try {
+      const headers: Record<string, string> = {
+        'Content-Type': 'application/json',
+      };
+      
+      if (sessionId) {
+        headers['mcp-session-id'] = sessionId;
+      }
+
       const response = await fetch(`${this.mcpServerUrl}`, {
         method: 'POST',
-        headers: {
-          'Content-Type': 'application/json',
-        },
+        headers,
         body: JSON.stringify(requestBody),
       });
 
       console.log(`MCP server response: ${response.status} ${response.statusText}`);
-      
+
       const responseBody = await response.text();
       console.log(`MCP server response body length: ${responseBody.length}`);
       console.log(`MCP server response body:`, responseBody);
@@ -131,6 +262,11 @@ export class GrafanaMcpHttpProxy {
   }
 
   async shutdown(): Promise<void> {
+    if (this.sseConnection) {
+      this.sseConnection.abort();
+      this.sseConnection = null;
+      this.sessionId = null;
+    }
     if (this.mcpProcess) {
       this.mcpProcess.kill();
       this.mcpProcess = null;

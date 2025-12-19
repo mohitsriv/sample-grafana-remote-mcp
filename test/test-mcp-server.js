@@ -6,11 +6,11 @@ const fs = require('fs');
 const path = require('path');
 
 // Configuration from deployment outputs
-const CLOUDFRONT_URL = 'https://d2xnjagm7hgp3e.cloudfront.net';
-const USER_POOL_ID = 'us-west-2_M6ccVF0gC';
-const CLIENT_ID = '4td2d9um9lhhplci3u5t0ba6bi';
+const CLOUDFRONT_URL = 'https://d3jifvmn9ry95.cloudfront.net';
+const USER_POOL_ID = 'us-east-1_012WSvZ3O';
+const CLIENT_ID = '59q3oi9virobefilsptmcfmbo6';
 const MCP_BASE_PATH = '/grafana/mcp';
-const COGNITO_DOMAIN = 'https://mcp-server-2065-uswest2.auth.us-west-2.amazoncognito.com';
+const COGNITO_DOMAIN = 'https://mcp-server-6311-useast1.auth.us-east-1.amazoncognito.com';
 
 // Load environment variables from .env file if it exists
 let CLIENT_SECRET = null;

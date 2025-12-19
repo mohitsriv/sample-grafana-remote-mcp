@@ -1,5 +1,6 @@
 # Use Node.js 22 as the base image
-FROM public.ecr.aws/docker/library/node:22-slim
+# FROM public.ecr.aws/docker/library/node:22-slim
+FROM node:22-slim
 
 # Set working directory
 WORKDIR /app

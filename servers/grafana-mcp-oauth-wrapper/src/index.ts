@@ -80,19 +80,96 @@ app.use(`${basePath}/*`, async (c, next) => {
   }
 });
 
-// Proxy MCP requests to Grafana MCP server
+// Proxy MCP GET requests (SSE) to Grafana MCP server
+app.get(`${basePath}/`, async (c) => {
+  try {
+    console.log(`Received SSE connection request`);
+    console.log(`Request headers:`, c.req.header());
+    
+    // For HTTP transport, forward SSE connections directly
+    if (mcpTransport === 'http') {
+      const mcpServerPort = parseInt(process.env.MCP_SERVER_PORT || '3001');
+      const mcpServerUrl = `http://localhost:${mcpServerPort}/mcp`;
+      
+      const response = await fetch(mcpServerUrl, {
+        method: 'GET',
+        headers: {
+          'Accept': 'text/event-stream',
+        },
+        // @ts-ignore
+        bodyTimeout: 0,
+      });
+      
+      return new Response(response.body, {
+        status: response.status,
+        headers: response.headers,
+      });
+    }
+    
+    return c.json({ error: 'not_supported' }, 400);
+  } catch (error) {
+    console.error('MCP SSE connection error:', error);
+    return c.json({ 
+      error: 'internal_error', 
+      error_description: 'Failed to establish SSE connection' 
+    }, 500);
+  }
+});
+
+// Proxy MCP POST requests (JSON-RPC) to Grafana MCP server
 app.post(`${basePath}/`, async (c) => {
   try {
     const body = await c.req.json();
     console.log(`Received request body:`, body);
     console.log(`Request headers:`, c.req.header());
-    const response = await grafanaProxy.handleMcpRequest(body);
+    
+    // Forward session ID if present
+    const sessionId = c.req.header('mcp-session-id');
+    const response = await grafanaProxy.handleMcpRequest(body, sessionId);
     return response;
   } catch (error) {
     console.error('MCP request error:', error);
     return c.json({ 
       error: 'internal_error', 
       error_description: 'Failed to process MCP request' 
+    }, 500);
+  }
+});
+
+// Proxy MCP DELETE requests (session termination) to Grafana MCP server
+app.delete(`${basePath}/`, async (c) => {
+  try {
+    console.log(`Received session termination request`);
+    console.log(`Request headers:`, c.req.header());
+    
+    // For HTTP transport, forward DELETE to terminate session
+    if (mcpTransport === 'http') {
+      const mcpServerPort = parseInt(process.env.MCP_SERVER_PORT || '3001');
+      const mcpServerUrl = `http://localhost:${mcpServerPort}/mcp`;
+      const sessionId = c.req.header('mcp-session-id');
+      
+      const headers: Record<string, string> = {};
+      if (sessionId) {
+        headers['mcp-session-id'] = sessionId;
+      }
+      
+      const response = await fetch(mcpServerUrl, {
+        method: 'DELETE',
+        headers,
+      });
+      
+      return new Response(response.body, {
+        status: response.status,
+        headers: response.headers,
+      });
+    }
+    
+    return c.json({ error: 'not_supported' }, 400);
+  } catch (error) {
+    console.error('MCP session termination error:', error);
+    return c.json({ 
+      error: 'internal_error', 
+      error_description: 'Failed to terminate session' 
     }, 500);
   }
 });
