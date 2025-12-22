@@ -1,6 +1,44 @@
-# Grafana MCP Server with OAuth 2.1
+# Grafana MCP Server with OAuth 2.1 & Enhanced Datasource Querying
 
-Secure [Grafana MCP](https://github.com/grafana/mcp-grafana) (Model Context Protocol) server with OAuth 2.1 authentication on AWS, enabling AI agents to query Grafana dashboards, metrics, traces, and logs.
+Secure [Grafana MCP](https://github.com/grafana/mcp-grafana) (Model Context Protocol) server with OAuth 2.1 authentication on AWS, enabling AI agents to query Grafana dashboards, metrics, traces, and logs. **Enhanced with custom tools for generic datasource querying including Azure Monitor, Prometheus, SQL databases, and more.**
+
+## Features
+
+🔐 **OAuth 2.1 Security**: Cognito-based authentication with JWT validation  
+🌐 **Global CDN**: CloudFront with WAF protection  
+🚀 **Serverless**: ECS Fargate with auto-scaling  
+📊 **58 MCP Tools**: All official Grafana tools + 2 enhanced custom tools  
+🔍 **Generic Datasource Querying**: Query any Grafana datasource with native formats  
+☁️ **Azure Monitor Support**: KQL queries for logs and metrics  
+📈 **Multi-Datasource**: Prometheus (PromQL), SQL databases, InfluxDB, Loki, and more  
+
+## Enhanced MCP Tools
+
+### Official Grafana Tools (56)
+- Dashboard management and querying
+- Alert rule management  
+- User and organization management
+- Datasource-specific tools (Prometheus, Loki, etc.)
+
+### Custom Enhanced Tools (2)
+
+#### `list_datasources_detailed`
+Lists all Grafana datasources with:
+- Detailed type information
+- Query format examples for each datasource type
+- Azure Monitor KQL examples
+- Prometheus PromQL examples  
+- SQL query templates
+- Usage guidance
+
+#### `query_datasource`
+Query any Grafana datasource with native query formats:
+- **Azure Monitor**: KQL queries for logs and metrics
+- **Prometheus**: PromQL for metrics
+- **MySQL/PostgreSQL**: SQL queries
+- **InfluxDB**: Flux or InfluxQL queries
+- **Loki**: LogQL queries
+- **Any datasource type** supported by Grafana
 
 ## Architecture
 
@@ -15,14 +53,17 @@ Secure [Grafana MCP](https://github.com/grafana/mcp-grafana) (Model Context Prot
                     ▼                                   ▼
             ┌──────────────┐                  ┌──────────────┐
             │   Cognito    │                  │  ECS Fargate │
-            │  User Pool   │                  │              │
-            │ (OAuth 2.1)  │                  │ ┌──────────┐ │
-            └──────────────┘                  │ │  OAuth   │ │
-                    │                         │ │ Wrapper  │ │
-                    │ JWT Validation          │ └────┬─────┘ │
-                    └─────────────────────────┤      │       │
+            │  User Pool   │                  │   (Single    │
+            │ (OAuth 2.1)  │                  │  Container)  │
+            └──────────────┘                  │ ┌──────────┐ │
+                    │                         │ │  OAuth   │ │
+                    │ JWT Validation          │ │ Wrapper  │ │
+                    └─────────────────────────┤ └────┬─────┘ │
+                                              │      │       │
                                               │      ▼       │
                                               │ ┌──────────┐ │
+                                              │ │ Custom   │ │
+                                              │ │ Tools +  │ │
                                               │ │ Grafana  │ │
                                               │ │   MCP    │ │
                                               │ │  Server  │ │
@@ -33,10 +74,11 @@ Secure [Grafana MCP](https://github.com/grafana/mcp-grafana) (Model Context Prot
 ## Components
 
 - **Cognito User Pool**: OAuth 2.1 authorization with MFA support
-- **CloudFront + WAF**: Global CDN with multi-layer protection
-- **ECS Fargate**: Serverless container hosting
-- **OAuth Wrapper**: JWT token validation and proxying
-- **Grafana MCP Server**: Official MCP server for Grafana integration
+- **CloudFront + WAF**: Global CDN with multi-layer protection  
+- **ECS Fargate**: Single container for session continuity
+- **OAuth Wrapper**: JWT token validation and request proxying
+- **Custom Tool Handler**: Enhanced datasource querying capabilities
+- **Grafana MCP Server**: Official MCP server with 56 tools
 
 ## Prerequisites
 
@@ -47,6 +89,18 @@ Secure [Grafana MCP](https://github.com/grafana/mcp-grafana) (Model Context Prot
 
 ## Deployment
 
+### Quick Start
+
+```bash
+cdk deploy MCP-Server \
+  --context grafanaUrl="https://your-grafana-instance.com" \
+  --context grafanaApiKey="your-service-account-token" \
+  --context mcpTransport="http" \
+  --require-approval never
+```
+
+**Important**: Use `mcpTransport="http"` for streamable-http transport with proper session management.
+
 ### Automated Setup
 
 ```bash
@@ -54,15 +108,6 @@ scripts/complete-setup.sh
 ```
 
 Retrieves Grafana configuration from Parameter Store (`/workshop/grafana-url`, `/workshop/grafana-api-key`) and deploys all stacks.
-
-### Manual Deployment
-
-```bash
-cdk deploy --all \
-  --context grafanaUrl=https://your-grafana-instance.com \
-  --context grafanaApiKey=your-service-account-token \
-  --context mcpTransport=http
-```
 
 ### Optional: Use Existing VPC
 
@@ -107,21 +152,81 @@ curl https://your-cloudfront-url/.well-known/oauth-protected-resource
 curl https://your-cloudfront-url/grafana/mcp/
 ```
 
+## Usage Examples
+
+### Azure Monitor Logs
+```bash
+# 1. List datasources with query examples
+curl -X POST https://your-cloudfront-url/grafana/mcp/ \
+  -H "Authorization: Bearer $TOKEN" \
+  -H "Content-Type: application/json" \
+  -d '{"jsonrpc":"2.0","method":"list_datasources_detailed","id":1}'
+
+# 2. Query Azure Monitor logs with KQL
+curl -X POST https://your-cloudfront-url/grafana/mcp/ \
+  -H "Authorization: Bearer $TOKEN" \
+  -H "Content-Type: application/json" \
+  -d '{
+    "jsonrpc":"2.0",
+    "method":"query_datasource",
+    "params":{
+      "datasourceUid":"azure-monitor-uid",
+      "query":{"kusto":"Heartbeat | where TimeGenerated > ago(1h) | limit 10"},
+      "timeRange":{"from":"now-1h","to":"now"}
+    },
+    "id":2
+  }'
+```
+
+### Prometheus Metrics
+```bash
+# Query Prometheus with PromQL
+curl -X POST https://your-cloudfront-url/grafana/mcp/ \
+  -H "Authorization: Bearer $TOKEN" \
+  -H "Content-Type: application/json" \
+  -d '{
+    "jsonrpc":"2.0",
+    "method":"query_datasource",
+    "params":{
+      "datasourceUid":"prometheus-uid",
+      "query":{"expr":"up"},
+      "timeRange":{"from":"now-1h","to":"now"}
+    },
+    "id":3
+  }'
+```
+
 ## Testing
 
 ```bash
+# Test OAuth and basic functionality
 node test/test-mcp-server.js
+
+# Test custom tools (requires CLIENT_SECRET in .env)
+node test/test-custom-tools.js
 ```
+
+## Current Deployment Status
+
+✅ **Session Management**: Fixed multi-container load balancing issues  
+✅ **Custom Tools**: Enhanced datasource querying deployed  
+✅ **Azure Monitor**: KQL query support active  
+✅ **58 MCP Tools**: All tools enumerable and functional  
+✅ **Single Container**: ECS configured for session continuity  
+
+**MCP Server URL**: `https://d3jifvmn9ry95.cloudfront.net/grafana/mcp/`
 
 ## Agentic Observability
 
 This MCP server enables AI agents to interact with Grafana for:
-- Querying dashboards and metrics
-- Analyzing traces and logs
-- Investigating incidents
-- Providing intelligent troubleshooting
+- **Generic Datasource Querying**: Query any datasource with native query formats
+- **Azure Monitor Integration**: KQL queries for logs and metrics  
+- **Multi-Cloud Observability**: Prometheus, SQL, InfluxDB, Loki support
+- **Dashboard Analysis**: Query and analyze Grafana dashboards
+- **Incident Investigation**: Intelligent troubleshooting with observability data
+- **Automated Monitoring**: AI-driven alerting and analysis
 
-Works with the [sample-grafana-prometheus-stack](https://github.com/aws-samples/sample-grafana-prometheus-stack) for complete agentic observability.
+Perfect for agentic workflows with [sample-grafana-prometheus-stack](https://github.com/aws-samples/sample-grafana-prometheus-stack) or Azure Grafana instances.
 
 ## Security Features
 

@@ -3,6 +3,7 @@ import { serve } from '@hono/node-server';
 import { OAuthValidator } from './oauth-validator';
 import { GrafanaMcpProxy } from './grafana-mcp-proxy';
 import { GrafanaMcpHttpProxy } from './grafana-mcp-http-proxy';
+import { CustomToolHandler } from './custom-tool-handler';
 
 const app = new Hono();
 const port = parseInt(process.env.PORT || '8080');
@@ -26,6 +27,12 @@ const grafanaProxy = mcpTransport === 'http'
       grafanaServiceAccountToken: process.env.GRAFANA_SERVICE_ACCOUNT_TOKEN!,
       grafanaUrl: process.env.GRAFANA_URL || 'http://localhost:3000',
     });
+
+// Initialize custom tool handler for extended functionality
+const customToolHandler = new CustomToolHandler(
+  process.env.GRAFANA_URL || 'http://localhost:3000',
+  process.env.GRAFANA_SERVICE_ACCOUNT_TOKEN!
+);
 
 console.log(`Using MCP transport: ${mcpTransport}`);
 
@@ -51,33 +58,26 @@ app.get(`${basePath}/.well-known/oauth-protected-resource`, (c) => {
   });
 });
 
-// MCP endpoints with OAuth protection
-app.use(`${basePath}/*`, async (c, next) => {
-  // Skip authentication for health check and well-known endpoints
-  if (c.req.path.endsWith('/health') || c.req.path.includes('/.well-known/')) {
-    return next();
-  }
+// Health check endpoint
+app.get(`${basePath}/health`, (c) => {
+  return c.json({ 
+    status: 'healthy', 
+    transport: mcpTransport,
+    timestamp: new Date().toISOString() 
+  });
+});
 
-  // Validate OAuth token
-  const authHeader = c.req.header('Authorization');
-  if (!authHeader || !authHeader.startsWith('Bearer ')) {
-    c.header('WWW-Authenticate', 'Bearer realm="grafana-mcp-server", error="invalid_token"');
-    return c.json({ error: 'invalid_token', error_description: 'Missing or invalid authorization header' }, 401);
-  }
-
-  const token = authHeader.substring(7);
+// OAuth 2.0 Protected Resource Metadata endpoint (RFC9728)
+app.get(`${basePath}/.well-known/oauth-protected-resource`, (c) => {
+  const baseUrl = `${c.req.header('x-forwarded-proto') || 'https'}://${c.req.header('host')}${basePath}`;
   
-  try {
-    const tokenPayload = await oauthValidator.validateToken(token);
-    (c as any).set('tokenPayload', tokenPayload);
-    return next();
-  } catch (error) {
-    c.header('WWW-Authenticate', 'Bearer realm="grafana-mcp-server", error="invalid_token"');
-    return c.json({ 
-      error: 'invalid_token', 
-      error_description: error instanceof Error ? error.message : 'Token validation failed' 
-    }, 401);
-  }
+  return c.json({
+    resource: baseUrl,
+    authorization_servers: [`https://cognito-idp.${process.env.AWS_REGION}.amazonaws.com/${process.env.COGNITO_USER_POOL_ID}`],
+    scopes_supported: ['mcp-server/read', 'mcp-server/write'],
+    bearer_methods_supported: ['header'],
+    resource_documentation: `${baseUrl}/docs`,
+  });
 });
 
 // Proxy MCP GET requests (SSE) to Grafana MCP server
@@ -123,7 +123,108 @@ app.post(`${basePath}/`, async (c) => {
     console.log(`Received request body:`, body);
     console.log(`Request headers:`, c.req.header());
     
-    // Forward session ID if present
+    // Check if this is a tools/call request for our custom tools
+    if (body.method === 'tools/call' && body.params?.name) {
+      const toolName = body.params.name;
+      if (customToolHandler.isCustomTool(toolName)) {
+        console.log(`Handling custom tool call: ${toolName}`);
+        // Convert tools/call format to direct method call format for our handler
+        const customRequest = {
+          method: toolName,
+          params: body.params.arguments || {},
+          id: body.id
+        };
+        const response = await customToolHandler.handleCustomTool(customRequest);
+        return c.json(response);
+      }
+    }
+    
+    // Special handling for tools/list to combine Grafana tools with our custom tools
+    if (body.method === 'tools/list') {
+      console.log('Handling tools/list - combining Grafana and custom tools');
+      
+      try {
+        // Get tools from Grafana MCP server
+        const sessionId = c.req.header('mcp-session-id');
+        const grafanaResponse = await grafanaProxy.handleMcpRequest(body, sessionId);
+        const grafanaData = await grafanaResponse.json() as any;
+        
+        console.log('Grafana tools response:', JSON.stringify(grafanaData, null, 2));
+        
+        // Get our custom tools directly (not through handleCustomTool)
+        const customTools = [
+          {
+            name: 'list_datasources_detailed',
+            description: 'List all Grafana datasources with detailed information including query examples for Azure Monitor (KQL), Prometheus (PromQL), SQL databases, and more',
+            inputSchema: {
+              type: 'object',
+              properties: {},
+              required: []
+            }
+          },
+          {
+            name: 'query_datasource',
+            description: 'Query any Grafana datasource using native query formats (KQL for Azure Monitor, PromQL for Prometheus, SQL for databases, etc.)',
+            inputSchema: {
+              type: 'object',
+              properties: {
+                datasourceUid: {
+                  type: 'string',
+                  description: 'The UID of the datasource to query'
+                },
+                query: {
+                  type: 'object',
+                  description: 'Query object in native format (e.g., {kusto: "KQL query"} for Azure Monitor, {expr: "PromQL"} for Prometheus)'
+                },
+                timeRange: {
+                  type: 'object',
+                  properties: {
+                    from: { type: 'string', description: 'Start time (e.g., "now-1h")' },
+                    to: { type: 'string', description: 'End time (e.g., "now")' }
+                  }
+                },
+                maxDataPoints: {
+                  type: 'number',
+                  description: 'Maximum number of data points to return'
+                }
+              },
+              required: ['datasourceUid', 'query']
+            }
+          }
+        ];
+        
+        // Combine the tools
+        if (grafanaData.result && grafanaData.result.tools) {
+          const combinedTools = [
+            ...grafanaData.result.tools,
+            ...customTools
+          ];
+          
+          console.log(`Combined ${grafanaData.result.tools.length} Grafana tools with ${customTools.length} custom tools = ${combinedTools.length} total`);
+          
+          return c.json({
+            jsonrpc: '2.0',
+            id: body.id,
+            result: {
+              tools: combinedTools
+            }
+          });
+        }
+        
+        // Fallback to Grafana response if no tools found
+        console.log('No Grafana tools found, returning Grafana response');
+        return c.json(grafanaData);
+        
+      } catch (error) {
+        console.error('Error in tools/list handling:', error);
+        return c.json({ 
+          error: 'internal_error', 
+          error_description: `Failed to combine tools: ${error}` 
+        }, 500);
+      }
+    }
+    
+    // Forward ALL other requests (including initialize) to official Grafana MCP server
     const sessionId = c.req.header('mcp-session-id');
     const response = await grafanaProxy.handleMcpRequest(body, sessionId);
     return response;

@@ -104,9 +104,9 @@ export class McpFargateServerConstruct extends Construct {
     const healthCheckPath = props.healthCheckPath || "/health";
     const memoryLimitMiB = props.memoryLimitMiB || 512;
     const cpuUnits = props.cpuUnits || 256;
-    const desiredCount = props.desiredCount || 2;
+    const desiredCount = props.desiredCount || 1;
     const minCapacity = props.minCapacity || 1;
-    const maxCapacity = props.maxCapacity || 5;
+    const maxCapacity = props.maxCapacity || 1;
     const albSecurityGroup = props.albSecurityGroup;
 
     // Create Docker image asset with platform specification for cross-architecture compatibility

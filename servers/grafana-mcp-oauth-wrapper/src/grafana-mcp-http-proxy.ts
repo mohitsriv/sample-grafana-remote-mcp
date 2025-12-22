@@ -234,6 +234,7 @@ export class GrafanaMcpHttpProxy {
         'Content-Type': 'application/json',
       };
       
+      // Only add session ID if we have one
       if (sessionId) {
         headers['mcp-session-id'] = sessionId;
       }
@@ -249,6 +250,30 @@ export class GrafanaMcpHttpProxy {
       const responseBody = await response.text();
       console.log(`MCP server response body length: ${responseBody.length}`);
       console.log(`MCP server response body:`, responseBody);
+
+      // If we get "Invalid session ID" error, try without session ID for basic operations
+      if (response.status === 400 && responseBody.includes('Invalid session ID')) {
+        console.log('Retrying request without session ID for basic operations');
+        
+        // Retry without session ID for basic operations like tools/list
+        const retryResponse = await fetch(`${this.mcpServerUrl}`, {
+          method: 'POST',
+          headers: {
+            'Content-Type': 'application/json',
+          },
+          body: JSON.stringify(requestBody),
+        });
+
+        console.log(`MCP server retry response: ${retryResponse.status} ${retryResponse.statusText}`);
+        const retryBody = await retryResponse.text();
+        console.log(`MCP server retry response body:`, retryBody);
+
+        return new Response(retryBody, {
+          status: retryResponse.status,
+          statusText: retryResponse.statusText,
+          headers: retryResponse.headers
+        });
+      }
 
       return new Response(responseBody, {
         status: response.status,
