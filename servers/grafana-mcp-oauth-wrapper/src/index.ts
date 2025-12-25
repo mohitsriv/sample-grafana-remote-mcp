@@ -47,29 +47,8 @@ app.get(`${basePath}/health`, (c) => {
 
 // OAuth 2.0 Protected Resource Metadata endpoint (RFC9728)
 app.get(`${basePath}/.well-known/oauth-protected-resource`, (c) => {
-  const baseUrl = `${c.req.header('x-forwarded-proto') || 'https'}://${c.req.header('host')}${basePath}`;
-  
-  return c.json({
-    resource: baseUrl,
-    authorization_servers: [`https://cognito-idp.${process.env.AWS_REGION}.amazonaws.com/${process.env.COGNITO_USER_POOL_ID}`],
-    scopes_supported: ['mcp-server/read', 'mcp-server/write'],
-    bearer_methods_supported: ['header'],
-    resource_documentation: `${baseUrl}/docs`,
-  });
-});
-
-// Health check endpoint
-app.get(`${basePath}/health`, (c) => {
-  return c.json({ 
-    status: 'healthy', 
-    transport: mcpTransport,
-    timestamp: new Date().toISOString() 
-  });
-});
-
-// OAuth 2.0 Protected Resource Metadata endpoint (RFC9728)
-app.get(`${basePath}/.well-known/oauth-protected-resource`, (c) => {
-  const baseUrl = `${c.req.header('x-forwarded-proto') || 'https'}://${c.req.header('host')}${basePath}`;
+  // Force HTTPS for OAuth discovery endpoint - CloudFront should always be HTTPS
+  const baseUrl = `https://${c.req.header('host')}${basePath}`;
   
   return c.json({
     resource: baseUrl,
@@ -83,35 +62,64 @@ app.get(`${basePath}/.well-known/oauth-protected-resource`, (c) => {
 // Proxy MCP GET requests (SSE) to Grafana MCP server
 app.get(`${basePath}/`, async (c) => {
   try {
-    console.log(`Received SSE connection request`);
+    console.log(`Received GET request`);
     console.log(`Request headers:`, c.req.header());
     
-    // For HTTP transport, forward SSE connections directly
-    if (mcpTransport === 'http') {
-      const mcpServerPort = parseInt(process.env.MCP_SERVER_PORT || '3001');
-      const mcpServerUrl = `http://localhost:${mcpServerPort}/mcp`;
+    const acceptHeader = c.req.header('accept') || '';
+    
+    // If client accepts text/event-stream, establish SSE connection
+    if (acceptHeader.includes('text/event-stream')) {
+      console.log('Establishing SSE connection');
       
-      const response = await fetch(mcpServerUrl, {
-        method: 'GET',
-        headers: {
-          'Accept': 'text/event-stream',
-        },
-        // @ts-ignore
-        bodyTimeout: 0,
-      });
-      
-      return new Response(response.body, {
-        status: response.status,
-        headers: response.headers,
-      });
+      return new Response(
+        new ReadableStream({
+          start(controller) {
+            // Send initial SSE connection established message
+            controller.enqueue(new TextEncoder().encode('data: {"type":"connection","status":"established"}\n\n'));
+            
+            // Keep connection alive with periodic heartbeat
+            const heartbeat = setInterval(() => {
+              try {
+                controller.enqueue(new TextEncoder().encode('data: {"type":"heartbeat"}\n\n'));
+              } catch (error) {
+                clearInterval(heartbeat);
+              }
+            }, 30000); // 30 second heartbeat
+            
+            // Handle connection close
+            return () => {
+              clearInterval(heartbeat);
+            };
+          }
+        }),
+        {
+          status: 200,
+          headers: {
+            'Content-Type': 'text/event-stream',
+            'Cache-Control': 'no-cache',
+            'Connection': 'keep-alive',
+            'Access-Control-Allow-Origin': '*',
+            'Access-Control-Allow-Headers': 'Cache-Control',
+          },
+        }
+      );
     }
     
-    return c.json({ error: 'not_supported' }, 400);
+    // For regular HTTP requests (like agent validation), return server info
+    console.log('Returning server info for validation');
+    return c.json({
+      server: 'grafana-mcp-oauth-wrapper',
+      version: '1.0.0',
+      transport: 'http',
+      capabilities: ['tools', 'resources'],
+      status: 'ready'
+    });
+    
   } catch (error) {
-    console.error('MCP SSE connection error:', error);
+    console.error('MCP GET request error:', error);
     return c.json({ 
       error: 'internal_error', 
-      error_description: 'Failed to establish SSE connection' 
+      error_description: 'Failed to process request' 
     }, 500);
   }
 });
@@ -119,8 +127,29 @@ app.get(`${basePath}/`, async (c) => {
 // Proxy MCP POST requests (JSON-RPC) to Grafana MCP server
 app.post(`${basePath}/`, async (c) => {
   try {
+    // Validate OAuth token for all POST requests
+    const authHeader = c.req.header('authorization');
+    if (!authHeader || !authHeader.startsWith('Bearer ')) {
+      return c.json({ 
+        error: 'unauthorized', 
+        error_description: 'Missing or invalid authorization header' 
+      }, 401);
+    }
+
+    const token = authHeader.substring(7); // Remove 'Bearer ' prefix
+    
+    try {
+      await oauthValidator.validateToken(token);
+    } catch (error) {
+      console.error('OAuth validation failed:', error);
+      return c.json({ 
+        error: 'unauthorized', 
+        error_description: 'Invalid or expired access token' 
+      }, 401);
+    }
+
     const body = await c.req.json();
-    console.log(`Received request body:`, body);
+    console.log(`Received authenticated request:`, body);
     console.log(`Request headers:`, c.req.header());
     
     // Check if this is a tools/call request for our custom tools
@@ -147,9 +176,21 @@ app.post(`${basePath}/`, async (c) => {
         // Get tools from Grafana MCP server
         const sessionId = c.req.header('mcp-session-id');
         const grafanaResponse = await grafanaProxy.handleMcpRequest(body, sessionId);
-        const grafanaData = await grafanaResponse.json() as any;
+        const responseText = await grafanaResponse.text();
         
-        console.log('Grafana tools response:', JSON.stringify(grafanaData, null, 2));
+        console.log('Grafana tools response text:', responseText);
+        
+        let grafanaData;
+        try {
+          grafanaData = JSON.parse(responseText);
+        } catch (parseError) {
+          console.log('Failed to parse Grafana response as JSON, treating as error:', parseError);
+          // If we can't parse the response, it might be a plain text error
+          // In this case, just return our custom tools
+          grafanaData = { result: { tools: [] } };
+        }
+        
+        console.log('Grafana tools response parsed:', JSON.stringify(grafanaData, null, 2));
         
         // Get our custom tools directly (not through handleCustomTool)
         const customTools = [

@@ -9,6 +9,10 @@ import { AwsSolutionsChecks } from "cdk-nag";
 
 const app = new cdk.App();
 
+// Get stack suffix from context (e.g., "AWS" or "Azure")
+const stackSuffix = app.node.tryGetContext("stackSuffix") || "";
+const stackPrefix = stackSuffix ? `MCP-${stackSuffix}` : "MCP";
+
 const resourceSuffix = app.node.addr
   .substring(0, 8)
   .toLowerCase()
@@ -22,7 +26,7 @@ const existingVpcId = app.node.tryGetContext("existingVpcId");
 const publicSubnetIds = app.node.tryGetContext("publicSubnetIds")?.split(",");
 const privateSubnetIds = app.node.tryGetContext("privateSubnetIds")?.split(",");
 
-// Create VPC stack (or use existing VPC)
+// Create VPC stack (or use existing VPC) - shared across deployments
 const vpcStack = new VpcStack(app, "MCP-VPC", {
   env: {
     account: process.env.CDK_DEFAULT_ACCOUNT,
@@ -33,7 +37,7 @@ const vpcStack = new VpcStack(app, "MCP-VPC", {
   privateSubnetIds,
 });
 
-// Create security stack (Cognito + WAF)
+// Create security stack (Cognito + WAF) - shared across deployments
 const securityStack = new SecurityStack(app, "MCP-Security", {
   env: {
     account: process.env.CDK_DEFAULT_ACCOUNT,
@@ -48,28 +52,31 @@ const securityStack = new SecurityStack(app, "MCP-Security", {
 const targetRegion = process.env.CDK_DEFAULT_REGION || "us-west-2";
 
 // Create CloudFront WAF stack in us-east-1 (required for CloudFront WAF)
-const cloudFrontWafStack = new CloudFrontWafStack(app, "MCP-CloudFront-WAF", {
+const cloudFrontWafStack = new CloudFrontWafStack(app, `${stackPrefix}-CloudFront-WAF`, {
   env: {
     account: process.env.CDK_DEFAULT_ACCOUNT,
     region: "us-east-1", // CloudFront WAF must be in us-east-1
   },
-  resourceSuffix,
+  resourceSuffix: stackSuffix ? `${resourceSuffix}-${stackSuffix.toLowerCase()}` : resourceSuffix,
   targetRegion, // Pass the target region to the CloudFront WAF stack
 });
 
 // Create MCPServerStack which includes both platform and servers
-const serverStack = new MCPServerStack(app, "MCP-Server", {
+const serverStack = new MCPServerStack(app, `${stackPrefix}-Server`, {
   env: {
     account: process.env.CDK_DEFAULT_ACCOUNT,
     region: process.env.CDK_DEFAULT_REGION,
   },
-  description: "Grafana MCP Server with OAuth 2.1 Authentication (SO9018)",
-  resourceSuffix,
+  description: `Grafana MCP Server ${stackSuffix ? `(${stackSuffix}) ` : ""}with OAuth 2.1 Authentication (SO9018)`,
+  resourceSuffix: stackSuffix ? `${resourceSuffix}-${stackSuffix.toLowerCase()}` : resourceSuffix,
   vpc: vpcStack.vpc,
 });
 serverStack.addDependency(cloudFrontWafStack);
 
 // Tag all resources
 cdk.Tags.of(app).add("Project", "Grafana-MCP-Server");
+if (stackSuffix) {
+  cdk.Tags.of(app).add("Environment", stackSuffix);
+}
 
 Aspects.of(app).add(new AwsSolutionsChecks({ verbose: true }));

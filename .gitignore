@@ -44,4 +44,4 @@ Thumbs.db
 .env
 
 # Status
-test/deployment-status.md
+test/deployment-status.mdcdk-*.out/

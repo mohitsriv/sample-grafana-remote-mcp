@@ -152,7 +152,10 @@ These tools extend the official Grafana MCP server with generic datasource query
       name: ds.name,
       type: ds.type,
       url: ds.url,
-      isDefault: ds.isDefault || false
+      isDefault: ds.isDefault || false,
+      // Extract workspace ID for Azure Monitor datasources
+      workspaceId: ds.type === 'grafana-azure-monitor-datasource' ? 
+        ds.jsonData?.logAnalyticsDefaultWorkspace : undefined
     }));
 
     // Provide query examples for common datasource types
@@ -209,7 +212,7 @@ These tools extend the official Grafana MCP server with generic datasource query
         {
           type: "text",
           text: `**Datasources Found**: ${detailedDatasources.length}\n\n${detailedDatasources.map(ds => 
-            `**${ds.name}** (${ds.type})\n- UID: \`${ds.uid}\`\n- Default: ${ds.isDefault ? 'Yes' : 'No'}\n- URL: ${ds.url || 'N/A'}`
+            `**${ds.name}** (${ds.type})\n- UID: \`${ds.uid}\`\n- Default: ${ds.isDefault ? 'Yes' : 'No'}\n- URL: ${ds.url || 'N/A'}${ds.workspaceId ? `\n- Workspace ID: \`${ds.workspaceId}\`` : ''}`
           ).join('\n\n')}`
         },
         {

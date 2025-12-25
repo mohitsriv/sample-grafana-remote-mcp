@@ -43,43 +43,49 @@ export class MCPServerStack extends cdk.Stack {
       const mcpTransport = this.node.tryGetContext("mcpTransport") || "stdio";
 
     // Get CloudFront WAF ARN from SSM (written by CloudFrontWafStack)
+    // Use the correct suffix based on stack suffix
+    const stackSuffix = this.node.tryGetContext("stackSuffix");
+    const wafSuffix = stackSuffix ? `c8adc83b-${stackSuffix.toLowerCase()}` : "c8adc83b";
     const cloudFrontWafArnParam =
       ssm.StringParameter.fromStringParameterAttributes(
         this,
         "CloudFrontWafArnParam",
         {
-          parameterName: `/mcp/cloudfront-waf-arn-${props.resourceSuffix}`,
+          parameterName: `/mcp/cloudfront-waf-arn-${wafSuffix}`,
         }
       );
 
-    // Get Cognito User Pool ID from SSM (written by SecurityStack)
+    // Get Cognito User Pool ID from SSM (shared across all deployments)
+    const baseResourceSuffix = "c8adc83b"; // Use the base suffix from security stack
     const userPoolIdParam = ssm.StringParameter.fromStringParameterAttributes(
       this,
       "UserPoolIdParam",
       {
-        parameterName: `/mcp/cognito/user-pool-id-${props.resourceSuffix}`,
+        parameterName: `/mcp/cognito/user-pool-id-${baseResourceSuffix}`,
       }
     );
 
-    // Get Cognito User Pool Client ID from SSM (written by SecurityStack)
+    // Get Cognito User Pool Client ID from SSM (shared across all deployments)
     const userPoolClientIdParam =
       ssm.StringParameter.fromStringParameterAttributes(
         this,
         "UserPoolClientIdParam",
         {
-          parameterName: `/mcp/cognito/user-pool-client-id-${props.resourceSuffix}`,
+          parameterName: `/mcp/cognito/user-pool-client-id-${baseResourceSuffix}`,
         }
       );
 
-    // Get Cognito User Pool Client Secret from Secrets Manager (written by SecurityStack)
+    // Get Cognito User Pool Client Secret from Secrets Manager (shared across all deployments)
     const userPoolClientSecret = cdk.aws_secretsmanager.Secret.fromSecretNameV2(
       this,
       "UserPoolClientSecret",
-      `/mcp/cognito/user-pool-client-secret-${props.resourceSuffix}`
+      `/mcp/cognito/user-pool-client-secret-${baseResourceSuffix}`
     );
 
-    // Create shared ECS cluster for all MCP servers
-    this.cluster = new ecs.Cluster(this, "MCPCluster", {
+    // Create ECS cluster with unique name based on stack suffix
+    const clusterName = stackSuffix ? `MCPCluster-${stackSuffix}` : "MCPCluster";
+    
+    this.cluster = new ecs.Cluster(this, clusterName, {
       vpc: props.vpc,
       //containerInsights: true,
       containerInsightsV2: ecs.ContainerInsights.ENHANCED,
@@ -182,8 +188,9 @@ export class MCPServerStack extends cdk.Stack {
       ? httpsSecurityGroup
       : httpSecurityGroup;
 
-    // Create S3 bucket for ALB and CloudFront access logs with proper encryption and lifecycle rules
-    const accessLogsBucket = new cdk.aws_s3.Bucket(this, "AccessLogsBucket", {
+    // Create S3 bucket for ALB and CloudFront access logs with unique name
+    const bucketName = stackSuffix ? `AccessLogsBucket-${stackSuffix}` : "AccessLogsBucket";
+    const accessLogsBucket = new cdk.aws_s3.Bucket(this, bucketName, {
       encryption: cdk.aws_s3.BucketEncryption.S3_MANAGED,
       enforceSSL: true,
       blockPublicAccess: cdk.aws_s3.BlockPublicAccess.BLOCK_ALL,
@@ -220,15 +227,18 @@ export class MCPServerStack extends cdk.Stack {
     // ****************************************************************
 
     // Deploy the Grafana MCP server with CloudFront
+    const serverConstructName = stackSuffix ? `GrafanaMcpServer-${stackSuffix}` : "GrafanaMcpServer";
+    const serverName = stackSuffix ? `grafana-mcp-${stackSuffix.toLowerCase()}` : "grafana-mcp";
+    
     const grafanaServer = new McpFargateServerConstruct(
       this,
-      "GrafanaMcpServer",
+      serverConstructName,
       {
         platform: {
           vpc: props.vpc,
           cluster: this.cluster,
         },
-        serverName: "grafana-mcp",
+        serverName: serverName,
         serverPath: path.join(
           __dirname,
           "../../servers/grafana-mcp-oauth-wrapper"
@@ -392,7 +402,8 @@ export class MCPServerStack extends cdk.Stack {
       });
 
       // Create A record for the custom domain
-      new route53.ARecord(this, "McpServerARecord", {
+      const recordName = stackSuffix ? `McpServerARecord-${stackSuffix}` : "McpServerARecord";
+      new route53.ARecord(this, recordName, {
         zone: hostedZone,
         recordName: customDomain,
         target: route53.RecordTarget.fromAlias(
@@ -408,9 +419,14 @@ export class MCPServerStack extends cdk.Stack {
         : `https://${this.distribution.distributionDomainName}`;
 
     // Output CloudFront distribution details
-    new cdk.CfnOutput(this, "CloudFrontDistributions", {
+    const outputName = stackSuffix ? `CloudFrontDistributions-${stackSuffix}` : "CloudFrontDistributions";
+    const outputDescription = stackSuffix 
+      ? `CloudFront HTTPS URL for ${stackSuffix} MCP server`
+      : "CloudFront HTTPS URLs for all MCP servers";
+      
+    new cdk.CfnOutput(this, outputName, {
       value: httpsUrl,
-      description: "CloudFront HTTPS URLs for all MCP servers",
+      description: outputDescription,
     });
   }
 }

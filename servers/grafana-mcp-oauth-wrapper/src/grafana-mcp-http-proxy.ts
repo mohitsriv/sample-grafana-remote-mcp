@@ -275,6 +275,25 @@ export class GrafanaMcpHttpProxy {
         });
       }
 
+      // If response is not JSON parseable and contains error text, convert to proper JSON error
+      if (!response.ok && responseBody && !responseBody.trim().startsWith('{')) {
+        console.log('Converting plain text error to JSON format');
+        const errorResponse = {
+          jsonrpc: '2.0',
+          id: requestBody.id || 1,
+          error: {
+            code: -32603,
+            message: 'Internal error',
+            data: responseBody.trim()
+          }
+        };
+        
+        return new Response(JSON.stringify(errorResponse), {
+          status: 200, // Return 200 with JSON-RPC error format
+          headers: { 'Content-Type': 'application/json' }
+        });
+      }
+
       return new Response(responseBody, {
         status: response.status,
         statusText: response.statusText,

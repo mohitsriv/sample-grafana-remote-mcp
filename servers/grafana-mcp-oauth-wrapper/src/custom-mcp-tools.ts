@@ -75,4 +75,5 @@ export interface DatasourceInfo {
   type: string;
   url?: string;
   isDefault?: boolean;
+  workspaceId?: string;
 }
